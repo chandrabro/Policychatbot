@@ -5,6 +5,8 @@ import "./globals.css";
 const display = Newsreader({
   subsets: ["latin"],
   weight: ["500", "600"],
+  style: ["normal"],
+  adjustFontFallback: false,
   variable: "--font-display",
 });
 const sans = Inter({ subsets: ["latin"], variable: "--font-sans" });

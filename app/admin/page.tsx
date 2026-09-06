@@ -54,6 +54,7 @@ export default function AdminPage() {
   const [unlocked, setUnlocked] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [hasBlobStorage, setHasBlobStorage] = useState(true);
   const [rows, setRows] = useState<FileRow[]>([]);
   const [running, setRunning] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -68,12 +69,15 @@ export default function AdminPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
       });
+      const data = await res.json();
       if (!res.ok) {
-        const data = await res.json();
         setPasswordError(data.error || "Wrong password.");
         return;
       }
       setUnlocked(true);
+      if (typeof data.hasBlobStorage === "boolean") {
+        setHasBlobStorage(data.hasBlobStorage);
+      }
     } catch {
       setPasswordError("Couldn't reach the server — try again.");
     } finally {
@@ -121,24 +125,55 @@ export default function AdminPage() {
         );
 
         updateRow(index, { status: "uploading", detail: "Uploading PDF… 0%" });
-        const blob = await withRetry(
-          () =>
-            withTimeout(
-              upload(`policies/${file.name}`, file, {
-                access: "public",
-                handleUploadUrl: "/api/admin/blob-upload",
-                clientPayload: password,
-                multipart: true,
-                onUploadProgress: ({ percentage }) => {
-                  updateRow(index, { detail: `Uploading PDF… ${Math.round(percentage)}%` });
-                },
-              }),
-              180_000,
-              "Upload attempt timed out after 3 minutes."
-            ),
-          3,
-          (attempt) => updateRow(index, { detail: `Upload stalled — retrying (${attempt}/3)…` })
-        );
+        let uploadedUrl = "";
+
+        if (hasBlobStorage) {
+          try {
+            const blob = await withRetry(
+              () =>
+                withTimeout(
+                  upload(`policies/${file.name}`, file, {
+                    access: "public",
+                    handleUploadUrl: "/api/admin/blob-upload",
+                    clientPayload: password,
+                    multipart: true,
+                    onUploadProgress: ({ percentage }) => {
+                      updateRow(index, { detail: `Uploading PDF… ${Math.round(percentage)}%` });
+                    },
+                  }),
+                  180_000,
+                  "Upload attempt timed out after 3 minutes."
+                ),
+              1
+            );
+            uploadedUrl = blob.url;
+          } catch (blobErr: any) {
+            console.warn("Vercel Blob upload failed, falling back to local storage:", blobErr);
+            updateRow(index, { detail: "Storing locally…" });
+            const formData = new FormData();
+            formData.append("file", file);
+            formData.append("password", password);
+            const localRes = await fetch("/api/admin/upload-local", {
+              method: "POST",
+              body: formData,
+            });
+            const localData = await localRes.json();
+            if (!localRes.ok) throw new Error(localData.error || blobErr.message);
+            uploadedUrl = localData.url;
+          }
+        } else {
+          updateRow(index, { detail: "Storing locally…" });
+          const formData = new FormData();
+          formData.append("file", file);
+          formData.append("password", password);
+          const localRes = await fetch("/api/admin/upload-local", {
+            method: "POST",
+            body: formData,
+          });
+          const localData = await localRes.json();
+          if (!localRes.ok) throw new Error(localData.error || "Failed to save file locally.");
+          uploadedUrl = localData.url;
+        }
 
         updateRow(index, { status: "saving", detail: "Saving to search index…" });
         const res = await fetch("/api/admin/save-index", {
@@ -147,7 +182,7 @@ export default function AdminPage() {
           body: JSON.stringify({
             password,
             fileName: file.name,
-            blobUrl: blob.url,
+            blobUrl: uploadedUrl,
             entries: chunks.map((c, i) => ({
               pageNumber: c.pageNumber,
               text: c.text,
@@ -163,7 +198,7 @@ export default function AdminPage() {
         updateRow(index, { status: "error", error: e.message || "Something went wrong." });
       }
     },
-    [password]
+    [password, hasBlobStorage]
   );
 
   const startIndexing = async () => {

@@ -2,6 +2,13 @@ import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 import { NextResponse } from "next/server";
 
 export async function POST(request: Request): Promise<NextResponse> {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    return NextResponse.json(
+      { error: "Vercel Blob token is not configured on the server." },
+      { status: 400 }
+    );
+  }
+
   const body = (await request.json()) as HandleUploadBody;
 
   try {
