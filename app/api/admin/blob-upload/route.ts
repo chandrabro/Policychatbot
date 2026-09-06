@@ -1,5 +1,5 @@
-import { handleUpload, type HandleUploadBody } from '@vercel/blob/client';
-import { NextResponse } from 'next/server';
+import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
+import { NextResponse } from "next/server";
 
 export async function POST(request: Request): Promise<NextResponse> {
   const body = (await request.json()) as HandleUploadBody;
@@ -8,24 +8,22 @@ export async function POST(request: Request): Promise<NextResponse> {
     const jsonResponse = await handleUpload({
       body,
       request,
-      token: process.env.BLOB_READ_WRITE_TOKEN,
-      onBeforeGenerateToken: async (pathname) => {
+      onBeforeGenerateToken: async (_pathname, clientPayload) => {
+        if (!process.env.ADMIN_PASSWORD || clientPayload !== process.env.ADMIN_PASSWORD) {
+          throw new Error("Wrong admin password.");
+        }
         return {
-          allowedContentTypes: ['application/pdf'],
-          maximumSizeInBytes: 50 * 1024 * 1024, // 50MB
+          allowedContentTypes: ["application/pdf", "application/octet-stream", "*/*"],
+          addRandomSuffix: true,
         };
       },
-      onUploadCompleted: async ({ blob }) => {
-        console.log('Blob upload completed successfully:', blob.url);
+      onUploadCompleted: async () => {
+        // No-op — the admin page tracks the resulting URL itself and saves
+        // it into the index in a separate call.
       },
     });
-
     return NextResponse.json(jsonResponse);
-  } catch (error) {
-    console.error('Blob upload error:', error);
-    return NextResponse.json(
-      { error: (error as Error).message },
-      { status: 400 }
-    );
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 400 });
   }
 }
