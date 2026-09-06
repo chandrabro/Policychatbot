@@ -26,15 +26,35 @@ async function getExtractor(onProgress?: (p: ModelProgress) => void) {
   return extractorPromise;
 }
 
-/** Embeds a batch of texts, returning one 384-dimensional vector per text. */
+const BATCH_SIZE = 8;
+
+function yieldToBrowser(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** Embeds a batch of texts, returning one 384-dimensional vector per text.
+ *  Processes in small batches with yields between them so a large document
+ *  doesn't freeze the tab (the browser's "Page Unresponsive" watchdog fires
+ *  after the main thread is blocked continuously for a few seconds). */
 export async function embedTexts(
   texts: string[],
   onProgress?: (p: ModelProgress) => void
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
   const extractor = await getExtractor(onProgress);
-  const output = await extractor(texts, { pooling: "mean", normalize: true });
-  return output.tolist();
+
+  const results: number[][] = [];
+  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
+    const batch = texts.slice(i, i + BATCH_SIZE);
+    const output = await extractor(batch, { pooling: "mean", normalize: true });
+    results.push(...output.tolist());
+    onProgress?.({
+      status: "embedding_batch",
+      progress: Math.round(((i + batch.length) / texts.length) * 100),
+    });
+    await yieldToBrowser();
+  }
+  return results;
 }
 
 /** Convenience wrapper for embedding a single piece of text (e.g. a question). */
