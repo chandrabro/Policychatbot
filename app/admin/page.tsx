@@ -29,6 +29,26 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
   ]);
 }
 
+async function withRetry<T>(
+  fn: (attempt: number) => Promise<T>,
+  attempts: number,
+  onRetry?: (attempt: number, error: Error) => void
+): Promise<T> {
+  let lastError: Error = new Error("Unknown error");
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn(attempt);
+    } catch (e: any) {
+      lastError = e;
+      if (attempt < attempts) {
+        onRetry?.(attempt, e);
+        await new Promise((r) => setTimeout(r, 1500 * attempt));
+      }
+    }
+  }
+  throw lastError;
+}
+
 export default function AdminPage() {
   const [password, setPassword] = useState("");
   const [unlocked, setUnlocked] = useState(false);
@@ -102,18 +122,23 @@ export default function AdminPage() {
 
         updateRow(index, { status: "uploading", detail: "Uploading PDF… 0%" });
         const useMultipart = file.size > 8 * 1024 * 1024; // ~8MB+
-        const blob = await withTimeout(
-          upload(`policies/${file.name}`, file, {
-            access: "public",
-            handleUploadUrl: "/api/admin/blob-upload",
-            clientPayload: password,
-            multipart: useMultipart,
-            onUploadProgress: ({ percentage }) => {
-              updateRow(index, { detail: `Uploading PDF… ${Math.round(percentage)}%` });
-            },
-          }),
-          90_000,
-          "Upload timed out after 90 seconds — check your connection and try again."
+        const blob = await withRetry(
+          () =>
+            withTimeout(
+              upload(`policies/${file.name}`, file, {
+                access: "public",
+                handleUploadUrl: "/api/admin/blob-upload",
+                clientPayload: password,
+                multipart: useMultipart,
+                onUploadProgress: ({ percentage }) => {
+                  updateRow(index, { detail: `Uploading PDF… ${Math.round(percentage)}%` });
+                },
+              }),
+              45_000,
+              "Upload attempt timed out after 45 seconds."
+            ),
+          3,
+          (attempt) => updateRow(index, { detail: `Upload stalled — retrying (${attempt}/3)…` })
         );
 
         updateRow(index, { status: "saving", detail: "Saving to search index…" });
