@@ -1,186 +1,196 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useState } from "react";
 import { upload } from "@vercel/blob/client";
-import { extractPdfPagesText } from "@/lib/pdfExtract";
-import { chunkPages } from "@/lib/chunk";
-import { embedTexts, type ModelProgress } from "@/lib/embeddingModel";
 
-type FileStatus =
-  | "waiting"
-  | "reading"
-  | "embedding"
-  | "uploading"
-  | "saving"
-  | "done"
-  | "error";
-
-type FileRow = {
+interface PolicyFile {
   file: File;
-  status: FileStatus;
-  detail?: string;
+  status: "idle" | "uploading" | "indexing" | "done" | "error";
   error?: string;
-};
+  url?: string;
+}
 
 export default function AdminPage() {
   const [password, setPassword] = useState("");
-  const [rows, setRows] = useState<FileRow[]>([]);
-  const [running, setRunning] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [files, setFiles] = useState<PolicyFile[]>([]);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [globalMessage, setGlobalMessage] = useState("");
 
-  const addFiles = (files: FileList | null) => {
-    if (!files) return;
-    const newRows: FileRow[] = Array.from(files)
-      .filter((f) => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf"))
-      .map((file) => ({ file, status: "waiting" }));
-    setRows((r) => [...r, ...newRows]);
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    const selectedFiles = Array.from(e.target.files).map((file) => ({
+      file,
+      status: "idle" as const,
+    }));
+    setFiles(selectedFiles);
   };
 
-  const updateRow = (index: number, patch: Partial<FileRow>) => {
-    setRows((rs) => rs.map((r, i) => (i === index ? { ...r, ...patch } : r)));
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    if (!e.dataTransfer.files) return;
+    const droppedFiles = Array.from(e.dataTransfer.files)
+      .filter((file) => file.type === "application/pdf")
+      .map((file) => ({
+        file,
+        status: "idle" as const,
+      }));
+    setFiles(droppedFiles);
   };
 
-  const processFile = useCallback(
-    async (index: number, file: File) => {
-      try {
-        updateRow(index, { status: "reading", detail: "Extracting text from PDF…" });
-        const pages = await extractPdfPagesText(file);
-        const chunks = chunkPages(pages);
-        if (chunks.length === 0) {
-          updateRow(index, { status: "error", error: "No readable text found in this PDF." });
-          return;
-        }
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+  };
 
-        updateRow(index, { status: "embedding", detail: "Loading free AI model…" });
-        const embeddings = await embedTexts(
-          chunks.map((c) => c.text),
-          (p: ModelProgress) => {
-            if (p.status === "progress" && typeof p.progress === "number") {
-              updateRow(index, { detail: `Downloading AI model… ${Math.round(p.progress)}%` });
-            } else if (p.status === "ready" || p.status === "done") {
-              updateRow(index, { detail: `Embedding ${chunks.length} chunks…` });
-            }
-          }
-        );
-
-        updateRow(index, { status: "uploading", detail: "Uploading PDF…" });
-        const blob = await upload(`policies/${file.name}`, file, {
-          access: "public",
-          handleUploadUrl: "/api/admin/blob-upload",
-          clientPayload: password,
-        });
-
-        updateRow(index, { status: "saving", detail: "Saving to search index…" });
-        const res = await fetch("/api/admin/save-index", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            password,
-            fileName: file.name,
-            blobUrl: blob.url,
-            entries: chunks.map((c, i) => ({
-              pageNumber: c.pageNumber,
-              text: c.text,
-              embedding: embeddings[i],
-            })),
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Failed to save index.");
-
-        updateRow(index, { status: "done", detail: `${chunks.length} chunks indexed.` });
-      } catch (e: any) {
-        updateRow(index, { status: "error", error: e.message || "Something went wrong." });
-      }
-    },
-    [password]
-  );
-
-  const startIndexing = async () => {
+  const processAndIndexFiles = async () => {
     if (!password) {
-      alert("Enter the admin password first.");
+      setGlobalMessage("Please enter the admin password.");
       return;
     }
-    setRunning(true);
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i].status === "done") continue;
-      await processFile(i, rows[i].file);
+
+    if (files.length === 0) {
+      setGlobalMessage("Please select at least one PDF file.");
+      return;
     }
-    setRunning(false);
+
+    setIsProcessing(true);
+    setGlobalMessage("");
+
+    const updatedFiles = [...files];
+
+    for (let i = 0; i < updatedFiles.length; i++) {
+      const item = updatedFiles[i];
+      item.status = "uploading";
+      setFiles([...updatedFiles]);
+
+      try {
+        // Upload directly to Vercel Blob using client upload helper
+        const blob = await upload(item.file.name, item.file, {
+          access: "public",
+          handleUploadUrl: "/api/admin/blob-upload",
+        });
+
+        item.url = blob.url;
+        item.status = "indexing";
+        setFiles([...updatedFiles]);
+
+        // Save index / metadata to your backend
+        const saveRes = await fetch("/api/admin/save-index", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-admin-password": password,
+          },
+          body: JSON.stringify({
+            fileName: item.file.name,
+            blobUrl: blob.url,
+          }),
+        });
+
+        if (!saveRes.ok) {
+          const errData = await saveRes.json();
+          throw new Error(errData.error || "Failed to save policy index");
+        }
+
+        item.status = "done";
+      } catch (err: any) {
+        item.status = "error";
+        item.error = err.message || "Upload or indexing failed";
+      }
+
+      setFiles([...updatedFiles]);
+    }
+
+    setIsProcessing(false);
   };
 
   return (
-    <main className="mx-auto max-w-2xl px-6 py-12">
-      <h1 className="font-display text-2xl text-ink">Policy Admin</h1>
-      <p className="mt-1 text-sm text-mute">
-        Add or update policy PDFs. Everything — reading the PDF, splitting it
-        into sections, and generating search embeddings — happens right here
-        in your browser using a free AI model. Nothing is installed and
-        nothing costs money.
-      </p>
+    <div className="min-h-screen bg-[#f5f4f0] p-8 flex flex-col items-center">
+      <div className="max-w-2xl w-full bg-white p-8 rounded-xl shadow-sm border border-stone-200">
+        <h1 className="text-2xl font-bold text-slate-800 mb-2">Policy Admin</h1>
+        <p className="text-stone-600 text-sm mb-6">
+          Add or update policy PDFs. Everything — reading the PDF, splitting it into sections, and
+          generating search embeddings — happens directly in your browser.
+        </p>
 
-      <input
-        type="password"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-        placeholder="Admin password"
-        className="mt-6 w-full rounded-md border border-line bg-panel px-3 py-2 text-ink outline-none focus:border-navy"
-      />
+        {globalMessage && (
+          <div className="mb-4 p-3 bg-red-50 text-red-700 text-sm rounded-md border border-red-200">
+            {globalMessage}
+          </div>
+        )}
 
-      <div
-        onClick={() => inputRef.current?.click()}
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={(e) => {
-          e.preventDefault();
-          addFiles(e.dataTransfer.files);
-        }}
-        className="mt-4 cursor-pointer rounded-lg border-2 border-dashed border-line bg-panel p-8 text-center hover:border-navy"
-      >
-        <input
-          ref={inputRef}
-          type="file"
-          accept="application/pdf"
-          multiple
-          className="hidden"
-          onChange={(e) => addFiles(e.target.files)}
-        />
-        <p className="font-medium text-ink">Drop policy PDFs here, or click to choose</p>
-        <p className="mt-1 text-sm text-mute">You can select all 30 at once</p>
-      </div>
-
-      {rows.length > 0 && (
-        <div className="mt-6 space-y-2">
-          {rows.map((r, i) => (
-            <div
-              key={i}
-              className="flex items-center justify-between rounded-md border border-line bg-panel px-3 py-2 text-sm"
-            >
-              <span className="truncate text-ink">{r.file.name}</span>
-              <span
-                className={
-                  r.status === "done"
-                    ? "text-navy"
-                    : r.status === "error"
-                    ? "text-amber"
-                    : "text-mute"
-                }
-              >
-                {r.status === "error" ? r.error : r.detail || r.status}
-              </span>
-            </div>
-          ))}
+        <div className="mb-6">
+          <label className="block text-xs font-semibold uppercase text-stone-500 mb-1">
+            Admin Password
+          </label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Enter admin password..."
+            className="w-full px-4 py-2 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-500"
+          />
         </div>
-      )}
 
-      {rows.length > 0 && (
-        <button
-          onClick={startIndexing}
-          disabled={running}
-          className="mt-5 w-full rounded-md bg-navy py-2.5 font-medium text-white transition hover:bg-navy-dark disabled:opacity-50"
+        <div
+          onDrop={handleDrop}
+          onDragOver={handleDragOver}
+          className="border-2 border-dashed border-stone-300 rounded-xl p-8 text-center bg-stone-50 hover:bg-stone-100 transition cursor-pointer mb-6"
         >
-          {running ? "Indexing…" : `Index ${rows.length} file(s)`}
+          <input
+            type="file"
+            multiple
+            accept="application/pdf"
+            onChange={handleFileSelect}
+            className="hidden"
+            id="pdf-upload-input"
+          />
+          <label htmlFor="pdf-upload-input" className="cursor-pointer block">
+            <p className="text-slate-700 font-medium">Drop policy PDFs here, or click to choose</p>
+            <p className="text-xs text-stone-500 mt-1">You can select all 30 at once</p>
+          </label>
+        </div>
+
+        {files.length > 0 && (
+          <div className="space-y-2 mb-6">
+            {files.map((item, idx) => (
+              <div
+                key={idx}
+                className="flex items-center justify-between p-3 bg-stone-50 rounded-lg border border-stone-200 text-sm"
+              >
+                <span className="truncate font-medium text-slate-700 max-w-[250px]">
+                  {item.file.name}
+                </span>
+
+                <div className="text-xs">
+                  {item.status === "idle" && <span className="text-stone-500">Ready</span>}
+                  {item.status === "uploading" && (
+                    <span className="text-amber-600 font-medium">Uploading to Blob...</span>
+                  )}
+                  {item.status === "indexing" && (
+                    <span className="text-blue-600 font-medium">Indexing text...</span>
+                  )}
+                  {item.status === "done" && (
+                    <span className="text-emerald-600 font-semibold">✓ Indexed</span>
+                  )}
+                  {item.status === "error" && (
+                    <span className="text-red-600 font-medium">
+                      {item.error || "Upload error"}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <button
+          onClick={processAndIndexFiles}
+          disabled={isProcessing || files.length === 0}
+          className="w-full py-3 bg-slate-800 text-white font-medium rounded-lg hover:bg-slate-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {isProcessing ? "Processing Policies..." : `Index ${files.length} file(s)`}
         </button>
-      )}
-    </main>
+      </div>
+    </div>
   );
 }
