@@ -31,9 +31,35 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 
 export default function AdminPage() {
   const [password, setPassword] = useState("");
+  const [unlocked, setUnlocked] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
   const [rows, setRows] = useState<FileRow[]>([]);
   const [running, setRunning] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const verifyPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setVerifying(true);
+    setPasswordError(null);
+    try {
+      const res = await fetch("/api/admin/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setPasswordError(data.error || "Wrong password.");
+        return;
+      }
+      setUnlocked(true);
+    } catch {
+      setPasswordError("Couldn't reach the server — try again.");
+    } finally {
+      setVerifying(false);
+    }
+  };
 
   const addFiles = (files: FileList | null) => {
     if (!files) return;
@@ -64,6 +90,10 @@ export default function AdminPage() {
           (p: ModelProgress) => {
             if (p.status === "progress" && typeof p.progress === "number") {
               updateRow(index, { detail: `Downloading AI model… ${Math.round(p.progress)}%` });
+            } else if (p.status === "embedding_batch") {
+              updateRow(index, {
+                detail: `Embedding ${chunks.length} chunks… ${p.progress}%`,
+              });
             } else if (p.status === "ready" || p.status === "done") {
               updateRow(index, { detail: `Embedding ${chunks.length} chunks…` });
             }
@@ -134,67 +164,82 @@ export default function AdminPage() {
         nothing costs money.
       </p>
 
-      <input
-        type="password"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-        placeholder="Admin password"
-        className="mt-6 w-full rounded-md border border-line bg-panel px-3 py-2 text-ink outline-none focus:border-navy"
-      />
+      {!unlocked ? (
+        <form onSubmit={verifyPassword} className="mt-6">
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Admin password"
+            autoFocus
+            className="w-full rounded-md border border-line bg-panel px-3 py-2 text-ink outline-none focus:border-navy"
+          />
+          {passwordError && <p className="mt-2 text-sm text-amber">{passwordError}</p>}
+          <button
+            type="submit"
+            disabled={verifying || !password}
+            className="mt-3 w-full rounded-md bg-navy py-2.5 font-medium text-white transition hover:bg-navy-dark disabled:opacity-50"
+          >
+            {verifying ? "Checking…" : "Unlock"}
+          </button>
+        </form>
+      ) : (
+        <>
+          <div
+            onClick={() => inputRef.current?.click()}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              addFiles(e.dataTransfer.files);
+            }}
+            className="mt-6 cursor-pointer rounded-lg border-2 border-dashed border-line bg-panel p-8 text-center hover:border-navy"
+          >
+            <input
+              ref={inputRef}
+              type="file"
+              accept="application/pdf"
+              multiple
+              className="hidden"
+              onChange={(e) => addFiles(e.target.files)}
+            />
+            <p className="font-medium text-ink">Drop policy PDFs here, or click to choose</p>
+            <p className="mt-1 text-sm text-mute">You can select all 30 at once</p>
+          </div>
 
-      <div
-        onClick={() => inputRef.current?.click()}
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={(e) => {
-          e.preventDefault();
-          addFiles(e.dataTransfer.files);
-        }}
-        className="mt-4 cursor-pointer rounded-lg border-2 border-dashed border-line bg-panel p-8 text-center hover:border-navy"
-      >
-        <input
-          ref={inputRef}
-          type="file"
-          accept="application/pdf"
-          multiple
-          className="hidden"
-          onChange={(e) => addFiles(e.target.files)}
-        />
-        <p className="font-medium text-ink">Drop policy PDFs here, or click to choose</p>
-        <p className="mt-1 text-sm text-mute">You can select all 30 at once</p>
-      </div>
-
-      {rows.length > 0 && (
-        <div className="mt-6 space-y-2">
-          {rows.map((r, i) => (
-            <div
-              key={i}
-              className="flex items-center justify-between rounded-md border border-line bg-panel px-3 py-2 text-sm"
-            >
-              <span className="truncate text-ink">{r.file.name}</span>
-              <span
-                className={
-                  r.status === "done"
-                    ? "text-navy"
-                    : r.status === "error"
-                    ? "text-amber"
-                    : "text-mute"
-                }
-              >
-                {r.status === "error" ? r.error : r.detail || r.status}
-              </span>
+          {rows.length > 0 && (
+            <div className="mt-6 space-y-2">
+              {rows.map((r, i) => (
+                <div
+                  key={i}
+                  className="flex items-center justify-between rounded-md border border-line bg-panel px-3 py-2 text-sm"
+                >
+                  <span className="truncate text-ink">{r.file.name}</span>
+                  <span
+                    className={
+                      r.status === "done"
+                        ? "text-navy"
+                        : r.status === "error"
+                        ? "text-amber"
+                        : "text-mute"
+                    }
+                  >
+                    {r.status === "error" ? r.error : r.detail || r.status}
+                  </span>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      )}
+          )}
 
-      {rows.length > 0 && (
-        <button
-          onClick={startIndexing}
-          disabled={running}
-          className="mt-5 w-full rounded-md bg-navy py-2.5 font-medium text-white transition hover:bg-navy-dark disabled:opacity-50"
-        >
-          {running ? "Indexing…" : `Index ${rows.length} file(s)`}
-        </button>
+          {rows.length > 0 && (
+            <button
+              onClick={startIndexing}
+              disabled={running}
+              className="mt-5 w-full rounded-md bg-navy py-2.5 font-medium text-white transition hover:bg-navy-dark disabled:opacity-50"
+            >
+              {running ? "Indexing…" : `Index ${rows.length} file(s)`}
+            </button>
+          )}
+        </>
       )}
     </main>
   );
