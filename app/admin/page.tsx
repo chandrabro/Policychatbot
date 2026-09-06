@@ -101,18 +101,19 @@ export default function AdminPage() {
         );
 
         updateRow(index, { status: "uploading", detail: "Uploading PDF… 0%" });
+        const useMultipart = file.size > 8 * 1024 * 1024; // ~8MB+
         const blob = await withTimeout(
           upload(`policies/${file.name}`, file, {
             access: "public",
             handleUploadUrl: "/api/admin/blob-upload",
             clientPayload: password,
-            multipart: true,
+            multipart: useMultipart,
             onUploadProgress: ({ percentage }) => {
               updateRow(index, { detail: `Uploading PDF… ${Math.round(percentage)}%` });
             },
           }),
-          120_000,
-          "Upload timed out after 2 minutes — check your connection and try again."
+          90_000,
+          "Upload timed out after 90 seconds — check your connection and try again."
         );
 
         updateRow(index, { status: "saving", detail: "Saving to search index…" });
